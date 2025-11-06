@@ -63,6 +63,21 @@ const assignmentSchema = new mongoose.Schema({
       default: Date.now,
     },
   }],
+  suggestionSource: {
+    type: String,
+    enum: ['manual', 'ai-generated'],
+    default: 'manual',
+  },
+  assignmentSuggestionId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'AssignmentSuggestion',
+    default: null,
+  },
+  taskBreakdown: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'DeveloperTask',
+    default: null,
+  },
 }, {
   timestamps: true,
 });

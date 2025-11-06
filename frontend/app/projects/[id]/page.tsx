@@ -6,9 +6,14 @@ import Layout from '@/components/Layout';
 import { isAuthenticated, getStoredUser } from '@/lib/auth';
 import { projectsAPI } from '@/lib/api';
 import { toast } from 'react-hot-toast';
-import { Briefcase, Users, Calendar, CheckCircle, XCircle, Clock, ArrowLeft, Edit, Trash2 } from 'lucide-react';
+import { Briefcase, Users, Calendar, CheckCircle, XCircle, Clock, ArrowLeft, Edit, Trash2, FileText, MessageSquare, Sparkles } from 'lucide-react';
 import ProjectModal from '@/components/projects/ProjectModal';
 import { clientsAPI } from '@/lib/api';
+import MeetingModal from '@/components/meetings/MeetingModal';
+import MeetingList from '@/components/meetings/MeetingList';
+import TranscriptUpload from '@/components/meetings/TranscriptUpload';
+import PRDViewer from '@/components/prd/PRDViewer';
+import AssignmentSuggestionsPanel from '@/components/assignments/AssignmentSuggestionsPanel';
 
 export default function ProjectDetailPage() {
   const params = useParams();
@@ -16,7 +21,10 @@ export default function ProjectDetailPage() {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
+  const [meetingModalOpen, setMeetingModalOpen] = useState(false);
+  const [selectedMeeting, setSelectedMeeting] = useState<string | null>(null);
   const [clients, setClients] = useState<any[]>([]);
+  const [activeTab, setActiveTab] = useState<'overview' | 'meetings' | 'prd' | 'suggestions'>('overview');
   const projectId = params?.id as string;
   const user = getStoredUser();
 
@@ -357,6 +365,58 @@ export default function ProjectDetailPage() {
           )}
         </div>
 
+        {/* Tabs */}
+        <div className="bg-white rounded-xl shadow-soft border border-gray-100 p-2">
+          <div className="flex items-center gap-2 overflow-x-auto">
+            <button
+              onClick={() => setActiveTab('overview')}
+              className={`px-4 py-2 rounded-lg font-medium transition-all whitespace-nowrap ${
+                activeTab === 'overview'
+                  ? 'bg-primary-600 text-white'
+                  : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              Overview
+            </button>
+            <button
+              onClick={() => setActiveTab('meetings')}
+              className={`px-4 py-2 rounded-lg font-medium transition-all whitespace-nowrap flex items-center gap-2 ${
+                activeTab === 'meetings'
+                  ? 'bg-primary-600 text-white'
+                  : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              <MessageSquare className="w-4 h-4" />
+              Meetings
+            </button>
+            <button
+              onClick={() => setActiveTab('prd')}
+              className={`px-4 py-2 rounded-lg font-medium transition-all whitespace-nowrap flex items-center gap-2 ${
+                activeTab === 'prd'
+                  ? 'bg-primary-600 text-white'
+                  : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              <FileText className="w-4 h-4" />
+              PRD
+            </button>
+            <button
+              onClick={() => setActiveTab('suggestions')}
+              className={`px-4 py-2 rounded-lg font-medium transition-all whitespace-nowrap flex items-center gap-2 ${
+                activeTab === 'suggestions'
+                  ? 'bg-primary-600 text-white'
+                  : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              <Sparkles className="w-4 h-4" />
+              AI Suggestions
+            </button>
+          </div>
+        </div>
+
+        {/* Tab Content */}
+        {activeTab === 'overview' && (
+          <>
         {/* All Assignments Table */}
         {assignments.length > 0 && (
           <div className="bg-white rounded-xl shadow-soft border border-gray-100 p-4 sm:p-6 overflow-hidden">
@@ -440,6 +500,64 @@ export default function ProjectDetailPage() {
             </div>
           </div>
         )}
+          </>
+        )}
+
+        {activeTab === 'meetings' && (
+          <div className="bg-white rounded-xl shadow-soft border border-gray-100 p-4 sm:p-6 space-y-6">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+                <MessageSquare className="w-5 h-5 text-primary-600" />
+                Meetings
+              </h2>
+              {canManage && (
+                <button
+                  onClick={() => setMeetingModalOpen(true)}
+                  className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-all font-medium"
+                >
+                  Create Meeting
+                </button>
+              )}
+            </div>
+            {selectedMeeting ? (
+              <div className="space-y-4">
+                <button
+                  onClick={() => setSelectedMeeting(null)}
+                  className="text-sm text-primary-600 hover:text-primary-700"
+                >
+                  ← Back to meetings
+                </button>
+                <TranscriptUpload
+                  meetingId={selectedMeeting}
+                  onSuccess={() => {
+                    setSelectedMeeting(null);
+                    loadProject();
+                  }}
+                />
+              </div>
+            ) : (
+              <MeetingList
+                projectId={projectId}
+                onSelectMeeting={setSelectedMeeting}
+              />
+            )}
+          </div>
+        )}
+
+        {activeTab === 'prd' && (
+          <div className="bg-white rounded-xl shadow-soft border border-gray-100 p-4 sm:p-6">
+            <PRDViewer projectId={projectId} />
+          </div>
+        )}
+
+        {activeTab === 'suggestions' && (
+          <div className="bg-white rounded-xl shadow-soft border border-gray-100 p-4 sm:p-6">
+            <AssignmentSuggestionsPanel
+              projectId={projectId}
+              onRefresh={loadProject}
+            />
+          </div>
+        )}
       </div>
 
       {modalOpen && (
@@ -447,6 +565,19 @@ export default function ProjectDetailPage() {
           project={data}
           onClose={handleModalClose}
           clients={clients}
+        />
+      )}
+
+      {meetingModalOpen && (
+        <MeetingModal
+          projectId={projectId}
+          onClose={() => setMeetingModalOpen(false)}
+          onSuccess={() => {
+            setMeetingModalOpen(false);
+            if (activeTab !== 'meetings') {
+              setActiveTab('meetings');
+            }
+          }}
         />
       )}
     </Layout>

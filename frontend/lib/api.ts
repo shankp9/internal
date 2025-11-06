@@ -121,3 +121,52 @@ export const profileAPI = {
   update: (data: { name?: string; password?: string; skills?: string[] }) =>
     api.put('/auth/profile', data),
 };
+
+// Meetings API
+export const meetingsAPI = {
+  create: (projectId: string, data: any) => {
+    // If data is FormData, use appropriate headers
+    if (data instanceof FormData) {
+      return api.post(`/meetings/${projectId}`, data, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+    }
+    return api.post(`/meetings/${projectId}`, data);
+  },
+  uploadTranscript: (meetingId: string, file: File) => {
+    const formData = new FormData();
+    formData.append('transcript', file);
+    return api.post(`/meetings/${meetingId}/transcript`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+  getById: (meetingId: string) => api.get(`/meetings/${meetingId}`),
+  getByProject: (projectId: string) => api.get(`/meetings/project/${projectId}`),
+  generatePRD: (meetingId: string) => api.post(`/meetings/${meetingId}/generate-prd`),
+  generateAssignments: (meetingId: string) => api.post(`/meetings/${meetingId}/generate-assignments`),
+};
+
+// PRD API
+export const prdAPI = {
+  getByProject: (projectId: string) => api.get(`/projects/${projectId}/prd`),
+  getVersions: (projectId: string) => api.get(`/projects/${projectId}/prd/versions`),
+  getVersion: (projectId: string, versionId: string) => api.get(`/projects/${projectId}/prd/versions/${versionId}`),
+  getDiff: (projectId: string, versionId: string) => api.get(`/projects/${projectId}/prd/diff/${versionId}`),
+  merge: (projectId: string, data: any) => api.post(`/projects/${projectId}/prd/merge`, data),
+};
+
+// Assignment Suggestions API
+export const assignmentSuggestionsAPI = {
+  getByProject: (projectId: string, params?: any) => api.get(`/projects/${projectId}/assignment-suggestions`, { params }),
+  getTasks: (suggestionId: string) => api.get(`/assignment-suggestions/${suggestionId}/tasks`),
+  approve: (suggestionId: string) => api.post(`/assignment-suggestions/${suggestionId}/approve`),
+  reject: (suggestionId: string, reason?: string) => api.post(`/assignment-suggestions/${suggestionId}/reject`, { rejectionReason: reason }),
+  getHistory: (projectId: string) => api.get(`/projects/${projectId}/assignment-suggestions/history`),
+};
+
+// Developer Tasks API
+export const developerTasksAPI = {
+  getByAssignment: (assignmentId: string) => api.get(`/assignments/${assignmentId}/tasks`),
+  getByDeveloper: (developerId: string, params?: any) => api.get(`/developers/${developerId}/tasks`, { params }),
+  update: (taskId: string, data: any) => api.put(`/developer-tasks/${taskId}`, data),
+};

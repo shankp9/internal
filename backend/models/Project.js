@@ -33,6 +33,11 @@ const projectSchema = new mongoose.Schema({
     enum: ['active', 'completed', 'on-hold', 'cancelled'],
     default: 'active',
   },
+  prdId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PRD',
+    default: null,
+  },
 }, {
   timestamps: true,
 });

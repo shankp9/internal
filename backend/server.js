@@ -13,6 +13,9 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Serve uploaded transcripts as static files
+app.use('/uploads/transcripts', express.static(path.join(__dirname, 'uploads/transcripts')));
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Resource Management System API' });
@@ -28,6 +31,11 @@ app.use('/api/developers', require('./routes/developers'));
 app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/search', require('./routes/search'));
+app.use('/api/meetings', require('./routes/meetings'));
+app.use('/api', require('./routes/prd'));
+app.use('/api', require('./routes/assignmentSuggestions'));
+app.use('/api', require('./routes/developerTasks'));
+app.use('/api/ai-consumption', require('./routes/aiConsumption'));
 
 // 404 handler - must be after all routes
 app.use((req, res) => {
