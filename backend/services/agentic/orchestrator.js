@@ -301,6 +301,179 @@ async function executeWorkflow(input, options = {}) {
     const validationEnd = Date.now();
     console.log(`[Workflow] Validation completed in ${validationEnd - validationStart}ms`);
     await saveAgentResult('validation', 'completed', state.suggestions || state);
+    
+    // Save assignment suggestions to database
+    if (state.suggestions && state.suggestions.length > 0 && state.metadata.projectId && state.metadata.meetingId) {
+      try {
+        const AssignmentSuggestion = require('../../models/AssignmentSuggestion');
+        const DeveloperTask = require('../../models/DeveloperTask');
+        const User = require('../../models/User');
+        
+        console.log(`[Pipeline] Saving ${state.suggestions.length} assignment suggestions...`);
+        
+        // Batch fetch all developers at once
+        const developerIds = state.suggestions.map(s => s.developerId).filter(Boolean);
+        const developerNames = state.suggestions.map(s => s.developerName).filter(Boolean);
+        
+        const developers = await User.find({
+          $or: [
+            { _id: { $in: developerIds } },
+            { name: { $in: developerNames } },
+          ],
+        });
+        
+        const developerMap = new Map();
+        developers.forEach(dev => {
+          developerMap.set(dev._id.toString(), dev);
+          if (dev.name) developerMap.set(dev.name, dev);
+        });
+
+        // Prepare suggestions for batch creation
+        const suggestionsToCreate = [];
+        
+        for (const suggestion of state.suggestions) {
+          let developer = null;
+          if (suggestion.developerId) {
+            developer = developerMap.get(suggestion.developerId);
+          } else if (suggestion.developerName) {
+            developer = developerMap.get(suggestion.developerName);
+          }
+
+          // If matchScore is 0 or very low, mark for manual assignment
+          const needsManual = !developer || !suggestion.developerId || 
+                            (suggestion.matchScore !== undefined && suggestion.matchScore < 30);
+
+          suggestionsToCreate.push({
+            projectId: state.metadata.projectId,
+            meetingId: state.metadata.meetingId,
+            developerId: developer ? developer._id : null,
+            suggestedUtilization: suggestion.utilization || 50,
+            suggestedStartDate: new Date(suggestion.startDate),
+            suggestedEndDate: new Date(suggestion.endDate),
+            tags: suggestion.tags || [],
+            title: suggestion.title,
+            description: suggestion.description || '',
+            reasoning: suggestion.reasoning || 
+              (needsManual ? 'No suitable developer matched - manager needs to assign' : ''),
+            priority: suggestion.priority || 'medium',
+            status: 'pending',
+            createdBy: state.metadata.userId,
+            needsManualAssignment: needsManual,
+            _tempTaskBreakdown: suggestion.taskBreakdown,
+            _tempMatchScore: suggestion.matchScore || 0,
+          });
+        }
+
+        // Batch create all suggestions
+        const createdSuggestions = await AssignmentSuggestion.insertMany(suggestionsToCreate);
+        console.log(`[Pipeline] Created ${createdSuggestions.length} assignment suggestions`);
+
+        // Create tasks for suggestions that have breakdowns (batch)
+        const tasksToCreate = [];
+        const taskDependencyMap = new Map();
+
+        createdSuggestions.forEach((suggestion, index) => {
+          const originalSuggestion = suggestionsToCreate[index];
+          if (originalSuggestion._tempTaskBreakdown) {
+            const breakdown = originalSuggestion._tempTaskBreakdown;
+            
+            const rawDependencies = breakdown.dependencies || [];
+            taskDependencyMap.set(index, {
+              rawDependencies,
+              taskTitle: breakdown.taskTitle || suggestion.title,
+            });
+            
+            tasksToCreate.push({
+              assignmentSuggestionId: suggestion._id,
+              projectId: state.metadata.projectId,
+              developerId: suggestion.developerId || null,
+              title: breakdown.taskTitle || suggestion.title,
+              description: breakdown.taskDescription || suggestion.description || '',
+              subtasks: breakdown.subtasks || [],
+              acceptanceCriteria: breakdown.acceptanceCriteria || [],
+              dependencies: [],
+              technicalRequirements: breakdown.technicalRequirements || [],
+              estimatedEffort: breakdown.estimatedEffortHours || 0,
+              estimatedUtilization: suggestion.suggestedUtilization,
+              priority: suggestion.priority,
+              status: 'pending',
+            });
+          }
+        });
+
+        // Batch create all tasks (without dependencies first)
+        if (tasksToCreate.length > 0) {
+          const createdTasks = await DeveloperTask.insertMany(tasksToCreate);
+          console.log(`[Pipeline] Created ${createdTasks.length} developer tasks`);
+          
+          // Resolve dependencies
+          const titleToTaskIdMap = new Map();
+          createdTasks.forEach((task, idx) => {
+            const depInfo = taskDependencyMap.get(idx);
+            if (depInfo) {
+              titleToTaskIdMap.set(depInfo.taskTitle, task._id);
+            }
+          });
+
+          // Update tasks with resolved dependencies
+          const dependencyUpdateOps = [];
+          createdTasks.forEach((task, idx) => {
+            const depInfo = taskDependencyMap.get(idx);
+            if (depInfo && depInfo.rawDependencies.length > 0) {
+              const resolvedDependencies = depInfo.rawDependencies
+                .map(dep => {
+                  const dependentTaskId = titleToTaskIdMap.get(dep.taskId);
+                  if (dependentTaskId) {
+                    return {
+                      taskId: dependentTaskId,
+                      description: dep.description || `Depends on: ${dep.taskId}`,
+                      taskTitle: dep.taskId,
+                    };
+                  }
+                  return {
+                    taskId: null,
+                    description: dep.description || `Depends on: ${dep.taskId}`,
+                    taskTitle: dep.taskId,
+                  };
+                });
+
+              if (resolvedDependencies.length > 0) {
+                dependencyUpdateOps.push({
+                  updateOne: {
+                    filter: { _id: task._id },
+                    update: { $set: { dependencies: resolvedDependencies } },
+                  },
+                });
+              }
+            }
+          });
+
+          // Batch update tasks with resolved dependencies
+          if (dependencyUpdateOps.length > 0) {
+            await DeveloperTask.bulkWrite(dependencyUpdateOps);
+            console.log(`[Pipeline] Resolved dependencies for ${dependencyUpdateOps.length} tasks`);
+          }
+          
+          // Batch update suggestions with task references
+          const updateOps = createdTasks.map(task => ({
+            updateOne: {
+              filter: { _id: task.assignmentSuggestionId },
+              update: { $set: { taskBreakdown: task._id } },
+            },
+          }));
+          
+          if (updateOps.length > 0) {
+            await AssignmentSuggestion.bulkWrite(updateOps);
+          }
+        }
+        
+        console.log('[Pipeline] Assignment suggestions saved successfully');
+      } catch (suggestionError) {
+        console.error('[Pipeline] Error saving assignment suggestions:', suggestionError);
+        console.error('[Pipeline] Error stack:', suggestionError.stack);
+      }
+    }
+    
     emitEvent('pipeline-status', {
       currentAgent: 'validation',
       status: 'completed',

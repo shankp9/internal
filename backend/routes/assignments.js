@@ -4,6 +4,7 @@ const Project = require('../models/Project');
 const Notification = require('../models/Notification');
 const User = require('../models/User');
 const { protect } = require('../middleware/auth');
+const { generateTaskBreakdown } = require('../services/taskBreakdownService');
 
 const router = express.Router();
 
@@ -77,6 +78,180 @@ router.get('/', protect, async (req, res) => {
   }
 });
 
+// @route   GET /api/assignments/:id/task-breakdown
+// @desc    Get task breakdown in markdown format
+// @access  Private
+router.get('/:id/task-breakdown', protect, async (req, res) => {
+  try {
+    let assignment;
+
+    if (req.user.role === 'employee') {
+      assignment = await Assignment.findOne({
+        _id: req.params.id,
+        developerId: req.user._id,
+      });
+    } else if (req.user.role === 'manager') {
+      const managerProjects = await Project.find({ managerId: req.user._id }).distinct('_id');
+      assignment = await Assignment.findOne({
+        _id: req.params.id,
+        projectId: { $in: managerProjects },
+      });
+    } else {
+      assignment = await Assignment.findById(req.params.id);
+    }
+
+    if (!assignment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Assignment not found',
+      });
+    }
+
+    // Return null for markdown if it's empty or doesn't exist
+    const markdown = assignment.taskBreakdownMarkdown && assignment.taskBreakdownMarkdown.trim() !== ''
+      ? assignment.taskBreakdownMarkdown
+      : null;
+
+    res.json({
+      success: true,
+      data: {
+        markdown,
+        generatedAt: assignment.taskBreakdownGeneratedAt,
+        lastUpdated: assignment.taskBreakdownLastUpdated,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// @route   POST /api/assignments/:id/generate-breakdown
+// @desc    Regenerate task breakdown using AI
+// @access  Private/Admin/Manager
+router.post('/:id/generate-breakdown', protect, async (req, res) => {
+  try {
+    if (req.user.role === 'employee') {
+      return res.status(403).json({
+        success: false,
+        message: 'Employees cannot generate task breakdowns',
+      });
+    }
+
+    let assignment;
+
+    if (req.user.role === 'manager') {
+      const managerProjects = await Project.find({ managerId: req.user._id }).distinct('_id');
+      assignment = await Assignment.findOne({
+        _id: req.params.id,
+        projectId: { $in: managerProjects },
+      });
+    } else {
+      assignment = await Assignment.findById(req.params.id);
+    }
+
+    if (!assignment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Assignment not found',
+      });
+    }
+
+    // Populate project and developer
+    await assignment.populate([
+      { path: 'projectId', select: 'name clientId managerId tags' },
+      { path: 'developerId', select: 'name email skills' },
+    ]);
+
+    // Generate task breakdown
+    const taskBreakdownMarkdown = await generateTaskBreakdown(
+      assignment,
+      assignment.projectId,
+      assignment.developerId
+    );
+
+    assignment.taskBreakdownMarkdown = taskBreakdownMarkdown;
+    assignment.taskBreakdownGeneratedAt = new Date();
+    assignment.taskBreakdownLastUpdated = null; // Reset since it's regenerated
+    await assignment.save();
+
+    res.json({
+      success: true,
+      data: {
+        markdown: assignment.taskBreakdownMarkdown,
+        generatedAt: assignment.taskBreakdownGeneratedAt,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// @route   PUT /api/assignments/:id/task-breakdown
+// @desc    Update task breakdown (edit mode for managers/admins)
+// @access  Private/Admin/Manager
+router.put('/:id/task-breakdown', protect, async (req, res) => {
+  try {
+    if (req.user.role === 'employee') {
+      return res.status(403).json({
+        success: false,
+        message: 'Employees cannot update task breakdowns',
+      });
+    }
+
+    const { markdown } = req.body;
+
+    if (!markdown || typeof markdown !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'Markdown content is required',
+      });
+    }
+
+    let assignment;
+
+    if (req.user.role === 'manager') {
+      const managerProjects = await Project.find({ managerId: req.user._id }).distinct('_id');
+      assignment = await Assignment.findOne({
+        _id: req.params.id,
+        projectId: { $in: managerProjects },
+      });
+    } else {
+      assignment = await Assignment.findById(req.params.id);
+    }
+
+    if (!assignment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Assignment not found',
+      });
+    }
+
+    assignment.taskBreakdownMarkdown = markdown;
+    assignment.taskBreakdownLastUpdated = new Date();
+    await assignment.save();
+
+    res.json({
+      success: true,
+      data: {
+        markdown: assignment.taskBreakdownMarkdown,
+        generatedAt: assignment.taskBreakdownGeneratedAt,
+        lastUpdated: assignment.taskBreakdownLastUpdated,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
 // @route   GET /api/assignments/:id
 // @desc    Get single assignment
 // @access  Private
@@ -112,6 +287,32 @@ router.get('/:id', protect, async (req, res) => {
       { path: 'submittedBy', select: 'name email' },
       { path: 'approvedBy', select: 'name email' },
     ]);
+
+    // Populate structured task breakdown if it exists
+    if (assignment.taskBreakdown) {
+      await assignment.populate({
+        path: 'taskBreakdown',
+        select: 'taskDescription description subtasks acceptanceCriteria technicalRequirements estimatedEffortHours',
+      });
+    }
+
+    // Populate assignment suggestion if it exists to get AI-generated details
+    if (assignment.assignmentSuggestionId) {
+      await assignment.populate({
+        path: 'assignmentSuggestionId',
+        select: 'title description reasoning priority meetingId taskBreakdown',
+        populate: [
+          {
+            path: 'meetingId',
+            select: 'title date',
+          },
+          {
+            path: 'taskBreakdown',
+            select: 'taskDescription description subtasks acceptanceCriteria technicalRequirements estimatedEffortHours',
+          },
+        ],
+      });
+    }
 
     res.json({
       success: true,
@@ -180,6 +381,23 @@ router.post('/', protect, async (req, res) => {
       { path: 'developerId', select: 'name email skills' },
       { path: 'submittedBy', select: 'name email' },
     ]);
+
+    // Auto-generate task breakdown
+    try {
+      const taskBreakdownMarkdown = await generateTaskBreakdown(assignment, assignment.projectId, assignment.developerId);
+      if (taskBreakdownMarkdown && taskBreakdownMarkdown.trim()) {
+        assignment.taskBreakdownMarkdown = taskBreakdownMarkdown;
+        assignment.taskBreakdownGeneratedAt = new Date();
+        await assignment.save();
+        console.log(`[Assignment] Task breakdown generated successfully for assignment ${assignment._id}`);
+      } else {
+        console.warn(`[Assignment] Task breakdown generation returned empty content for assignment ${assignment._id}`);
+      }
+    } catch (breakdownError) {
+      // Log error but don't fail the assignment creation
+      console.error(`[Assignment] Failed to generate task breakdown for assignment ${assignment._id}:`, breakdownError.message || breakdownError);
+      // Task breakdown can be generated later via the generate-breakdown endpoint
+    }
 
     // Create notifications
     try {
@@ -361,6 +579,28 @@ router.post('/:id/approve', protect, async (req, res) => {
     assignment.approvedBy = req.user._id;
     assignment.approvedAt = new Date();
     assignment.rejectionReason = null;
+
+    // Auto-generate or regenerate task breakdown when approved
+    try {
+      await assignment.populate([
+        { path: 'projectId', select: 'name clientId managerId tags' },
+        { path: 'developerId', select: 'name email skills' },
+      ]);
+      
+      const taskBreakdownMarkdown = await generateTaskBreakdown(assignment, assignment.projectId, assignment.developerId);
+      if (taskBreakdownMarkdown && taskBreakdownMarkdown.trim()) {
+        assignment.taskBreakdownMarkdown = taskBreakdownMarkdown;
+        assignment.taskBreakdownGeneratedAt = new Date();
+        assignment.taskBreakdownLastUpdated = null; // Reset since it's regenerated
+        console.log(`[Assignment] Task breakdown generated successfully for approved assignment ${assignment._id}`);
+      } else {
+        console.warn(`[Assignment] Task breakdown generation returned empty content for approved assignment ${assignment._id}`);
+      }
+    } catch (breakdownError) {
+      // Log error but don't fail the approval
+      console.error(`[Assignment] Failed to generate task breakdown for approved assignment ${assignment._id}:`, breakdownError.message || breakdownError);
+      // Task breakdown can be generated later via the generate-breakdown endpoint
+    }
 
     await assignment.save();
 

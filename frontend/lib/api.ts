@@ -86,6 +86,9 @@ export const assignmentsAPI = {
   reject: (id: string, reason?: string) =>
     api.post(`/assignments/${id}/reject`, { rejectionReason: reason }),
   delete: (id: string) => api.delete(`/assignments/${id}`),
+  getTaskBreakdown: (id: string) => api.get(`/assignments/${id}/task-breakdown`),
+  generateTaskBreakdown: (id: string) => api.post(`/assignments/${id}/generate-breakdown`),
+  updateTaskBreakdown: (id: string, markdown: string) => api.put(`/assignments/${id}/task-breakdown`, { markdown }),
 };
 
 // Developers API

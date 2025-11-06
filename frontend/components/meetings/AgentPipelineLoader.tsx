@@ -46,6 +46,8 @@ export default function AgentPipelineLoader({ meetingId }: AgentPipelineLoaderPr
         if (response.data.success && response.data.data) {
           const pipelineData = response.data.data;
           
+          console.log('[Pipeline] Loaded initial status from database:', pipelineData);
+          
           // Update overall status
           if (pipelineData.status === 'completed') {
             setIsCompleted(true);
@@ -82,7 +84,7 @@ export default function AgentPipelineLoader({ meetingId }: AgentPipelineLoaderPr
         }
       } catch (error) {
         // If pipeline status doesn't exist yet, that's okay - it will be created when pipeline starts
-        console.log('No pipeline status found yet');
+        console.log('[Pipeline] No pipeline status found yet:', error);
       }
     };
 
@@ -115,7 +117,8 @@ export default function AgentPipelineLoader({ meetingId }: AgentPipelineLoaderPr
       
       console.log('[Pipeline] Status update received:', { currentAgent, status, progress, message });
       
-      setCurrentProgress(progress || 0);
+      // Only update progress if it's greater than current (to prevent going backwards)
+      setCurrentProgress((prev) => Math.max(prev, progress || 0));
       setCurrentMessage(message || '');
 
       setAgents((prevAgents) => {
@@ -189,6 +192,7 @@ export default function AgentPipelineLoader({ meetingId }: AgentPipelineLoaderPr
     };
 
     // Set up event listeners BEFORE joining the room
+    // Use 'on' instead of 'once' to ensure listeners persist
     pipelineSocket.on('connect', handleConnect);
     pipelineSocket.on('disconnect', handleDisconnect);
     pipelineSocket.on('pipeline-status', handleStatusUpdate);
@@ -200,10 +204,60 @@ export default function AgentPipelineLoader({ meetingId }: AgentPipelineLoaderPr
       joinMeetingPipeline(meetingId);
     } else {
       // Wait for connection before joining
-      pipelineSocket.once('connect', () => {
+      const connectHandler = () => {
         joinMeetingPipeline(meetingId);
-      });
+        pipelineSocket.off('connect', connectHandler);
+      };
+      pipelineSocket.on('connect', connectHandler);
     }
+    
+    // Reload initial status when reconnecting to ensure we have the latest state
+    const handleReconnect = async () => {
+      console.log('[Pipeline] Reconnected, reloading initial status...');
+      try {
+        const response = await meetingsAPI.getPipelineStatus(meetingId);
+        if (response.data.success && response.data.data) {
+          const pipelineData = response.data.data;
+          
+          // Update overall status
+          if (pipelineData.status === 'completed') {
+            setIsCompleted(true);
+            setCurrentProgress(100);
+            setCurrentMessage('Pipeline completed successfully');
+          } else if (pipelineData.status === 'failed') {
+            setHasError(true);
+            setCurrentMessage(pipelineData.error || 'Pipeline execution failed');
+          } else {
+            setCurrentProgress(pipelineData.progress || 0);
+            setCurrentMessage(pipelineData.currentAgent ? `Running ${pipelineData.currentAgent}...` : 'Starting...');
+          }
+
+          // Update agent statuses from database
+          if (pipelineData.agentResults) {
+            setAgents((prevAgents) =>
+              prevAgents.map((agent) => {
+                const agentResult = pipelineData.agentResults[agent.id];
+                if (agentResult) {
+                  return {
+                    ...agent,
+                    status: agentResult.status as AgentStatus,
+                    message: agentResult.error || (agentResult.status === 'completed' ? 'Completed' : ''),
+                  };
+                }
+                if (pipelineData.status === 'running' && pipelineData.currentAgent === agent.id) {
+                  return { ...agent, status: 'active' as AgentStatus };
+                }
+                return agent;
+              })
+            );
+          }
+        }
+      } catch (error) {
+        console.log('[Pipeline] Failed to reload status on reconnect:', error);
+      }
+    };
+    
+    pipelineSocket.on('reconnect', handleReconnect);
 
     // Cleanup
     return () => {
@@ -213,6 +267,7 @@ export default function AgentPipelineLoader({ meetingId }: AgentPipelineLoaderPr
         pipelineSocket.off('pipeline-status', handleStatusUpdate);
         pipelineSocket.off('pipeline-completed', handleCompleted);
         pipelineSocket.off('pipeline-error', handleError);
+        pipelineSocket.off('reconnect', handleReconnect);
         leaveMeetingPipeline(meetingId);
       }
     };

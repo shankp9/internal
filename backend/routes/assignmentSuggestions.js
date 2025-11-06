@@ -433,6 +433,10 @@ router.get('/projects/:projectId/assignment-suggestions', protect, async (req, r
       .populate('meetingId', 'title meetingDate')
       .populate('createdBy', 'name email')
       .populate('reviewedBy', 'name email')
+      .populate({
+        path: 'taskBreakdown',
+        select: 'taskDescription description subtasks acceptanceCriteria technicalRequirements estimatedEffortHours',
+      })
       .sort({ createdAt: -1 });
 
     res.json({

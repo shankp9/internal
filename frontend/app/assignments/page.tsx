@@ -1,19 +1,25 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import Layout from '@/components/Layout';
 import { isAuthenticated, getStoredUser } from '@/lib/auth';
 import { assignmentsAPI, projectsAPI, developersAPI } from '@/lib/api';
 import { toast } from 'react-hot-toast';
-import { Plus, Check, X as XIcon, Edit, Trash2, FileText } from 'lucide-react';
+import { Plus, Check, X as XIcon, Edit, Trash2, FileText, Eye } from 'lucide-react';
 import AssignmentModal from '@/components/assignments/AssignmentModal';
+import TaskBreakdownViewer from '@/components/assignments/TaskBreakdownViewer';
 
 export default function AssignmentsPage() {
+  const router = useRouter();
   const [assignments, setAssignments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedAssignment, setSelectedAssignment] = useState<any>(null);
   const [filter, setFilter] = useState({ status: '', projectId: '', developerId: '' });
+  const [taskBreakdownModalOpen, setTaskBreakdownModalOpen] = useState(false);
+  const [selectedTaskBreakdown, setSelectedTaskBreakdown] = useState<{ assignmentId: string; markdown: string | null } | null>(null);
+  const [loadingTaskBreakdown, setLoadingTaskBreakdown] = useState(false);
   const user = getStoredUser();
 
   useEffect(() => {
@@ -87,6 +93,27 @@ export default function AssignmentsPage() {
     setModalOpen(false);
     setSelectedAssignment(null);
     loadAssignments();
+  };
+
+  const handleViewTaskBreakdown = async (assignmentId: string) => {
+    setLoadingTaskBreakdown(true);
+    setSelectedTaskBreakdown({ assignmentId, markdown: null });
+    setTaskBreakdownModalOpen(true);
+    try {
+      const response = await assignmentsAPI.getTaskBreakdown(assignmentId);
+      const breakdownData = response.data.data;
+      const markdown = breakdownData && breakdownData.markdown && breakdownData.markdown.trim() !== ''
+        ? breakdownData.markdown
+        : null;
+      setSelectedTaskBreakdown({ assignmentId, markdown });
+    } catch (error: any) {
+      if (error.response?.status !== 404) {
+        toast.error('Failed to load task breakdown');
+      }
+      setSelectedTaskBreakdown({ assignmentId, markdown: null });
+    } finally {
+      setLoadingTaskBreakdown(false);
+    }
   };
 
   const getStatusColor = (status: string) => {
@@ -200,17 +227,15 @@ export default function AssignmentsPage() {
                   <th className="px-4 sm:px-6 py-3 sm:py-4 text-left text-xs font-semibold text-text-heading uppercase tracking-wider hidden lg:table-cell">
                     Tags
                   </th>
-                  {canManage && (
-                    <th className="px-4 sm:px-6 py-3 sm:py-4 text-right text-xs font-semibold text-text-heading uppercase tracking-wider">
-                      Actions
-                    </th>
-                  )}
+                  <th className="px-4 sm:px-6 py-3 sm:py-4 text-right text-xs font-semibold text-text-heading uppercase tracking-wider">
+                    Actions
+                  </th>
                 </tr>
               </thead>
               <tbody className="bg-background-primary divide-y divide-border-light">
                 {assignments.length === 0 ? (
                   <tr>
-                    <td colSpan={canManage ? 7 : 6} className="px-4 sm:px-6 py-16 text-center">
+                    <td colSpan={7} className="px-4 sm:px-6 py-16 text-center">
                       <div className="flex flex-col items-center gap-3">
                         <FileText className="w-12 h-12 text-text-light" />
                         <p className="text-text-muted font-medium">No assignments found</p>
@@ -271,44 +296,60 @@ export default function AssignmentsPage() {
                           )}
                         </div>
                       </td>
-                      {canManage && (
-                        <td className="px-4 sm:px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                          <div className="flex items-center justify-end space-x-1">
-                            {canApprove && assignment.status === 'pending' && (
-                              <>
-                                <button
-                                  onClick={() => handleApprove(assignment._id)}
-                                  className="p-2 text-system-active-text hover:bg-system-active-bg rounded-lg transition-all group"
-                                  title="Approve"
-                                >
-                                  <Check className="w-4 h-4 group-hover:scale-110 transition-transform" />
-                                </button>
-                                <button
-                                  onClick={() => handleReject(assignment._id)}
-                                  className="p-2 text-priority-critical-text hover:bg-priority-critical-bg rounded-lg transition-all group"
-                                  title="Reject"
-                                >
-                                  <XIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />
-                                </button>
-                              </>
-                            )}
-                            <button
-                              onClick={() => handleEdit(assignment)}
-                              className="p-2 text-priority-high-text hover:bg-priority-high-bg rounded-lg transition-all group"
-                              title="Edit"
-                            >
-                              <Edit className="w-4 h-4 group-hover:scale-110 transition-transform" />
-                            </button>
-                            <button
-                              onClick={() => handleDelete(assignment._id)}
-                              className="p-2 text-priority-critical-text hover:bg-priority-critical-bg rounded-lg transition-all group"
-                              title="Delete"
-                            >
-                              <Trash2 className="w-4 h-4 group-hover:scale-110 transition-transform" />
-                            </button>
-                          </div>
-                        </td>
-                      )}
+                      <td className="px-4 sm:px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                        <div className="flex items-center justify-end space-x-1">
+                          <button
+                            onClick={() => router.push(`/assignments/${assignment._id}`)}
+                            className="p-2 text-primary-main hover:bg-primary-50 rounded-lg transition-all group"
+                            title="View Details"
+                          >
+                            <Eye className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                          </button>
+                          <button
+                            onClick={() => handleViewTaskBreakdown(assignment._id)}
+                            className="p-2 text-primary-main hover:bg-primary-50 rounded-lg transition-all group"
+                            title="View Task Breakdown"
+                          >
+                            <FileText className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                          </button>
+                          {canManage && (
+                            <>
+                              {canApprove && assignment.status === 'pending' && (
+                                <>
+                                  <button
+                                    onClick={() => handleApprove(assignment._id)}
+                                    className="p-2 text-system-active-text hover:bg-system-active-bg rounded-lg transition-all group"
+                                    title="Approve"
+                                  >
+                                    <Check className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                                  </button>
+                                  <button
+                                    onClick={() => handleReject(assignment._id)}
+                                    className="p-2 text-priority-critical-text hover:bg-priority-critical-bg rounded-lg transition-all group"
+                                    title="Reject"
+                                  >
+                                    <XIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                                  </button>
+                                </>
+                              )}
+                              <button
+                                onClick={() => handleEdit(assignment)}
+                                className="p-2 text-priority-high-text hover:bg-priority-high-bg rounded-lg transition-all group"
+                                title="Edit"
+                              >
+                                <Edit className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                              </button>
+                              <button
+                                onClick={() => handleDelete(assignment._id)}
+                                className="p-2 text-priority-critical-text hover:bg-priority-critical-bg rounded-lg transition-all group"
+                                title="Delete"
+                              >
+                                <Trash2 className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </td>
                     </tr>
                   ))
                 )}
@@ -323,6 +364,46 @@ export default function AssignmentsPage() {
           assignment={selectedAssignment}
           onClose={handleModalClose}
         />
+      )}
+
+      {taskBreakdownModalOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fadeIn">
+          <div className="bg-background-primary rounded-xl shadow-soft border border-border-light w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col animate-slideUp">
+            <div className="flex items-center justify-between p-6 border-b border-border-default">
+              <h2 className="text-xl font-bold text-text-heading flex items-center gap-2">
+                <FileText className="w-5 h-5" />
+                Task Breakdown
+              </h2>
+              <button
+                onClick={() => {
+                  setTaskBreakdownModalOpen(false);
+                  setSelectedTaskBreakdown(null);
+                }}
+                className="p-2 hover:bg-background-secondary rounded-lg transition-all"
+                title="Close"
+              >
+                <XIcon className="w-5 h-5 text-text-heading" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6">
+              {loadingTaskBreakdown ? (
+                <div className="flex items-center justify-center py-12">
+                  <div className="flex flex-col items-center gap-3">
+                    <div className="animate-spin rounded-full h-8 w-8 border-4 border-primary-200 border-t-primary-main"></div>
+                    <p className="text-sm text-text-muted">Loading task breakdown...</p>
+                  </div>
+                </div>
+              ) : selectedTaskBreakdown?.markdown ? (
+                <TaskBreakdownViewer markdown={selectedTaskBreakdown.markdown} />
+              ) : (
+                <div className="text-center py-12 text-text-muted">
+                  <p className="text-sm">No task breakdown available</p>
+                  <p className="text-xs mt-2 text-text-light">Task breakdown will be generated when assignment is created or approved</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </Layout>
   );

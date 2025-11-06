@@ -78,6 +78,18 @@ const assignmentSchema = new mongoose.Schema({
     ref: 'DeveloperTask',
     default: null,
   },
+  taskBreakdownMarkdown: {
+    type: String,
+    default: null,
+  },
+  taskBreakdownGeneratedAt: {
+    type: Date,
+    default: null,
+  },
+  taskBreakdownLastUpdated: {
+    type: Date,
+    default: null,
+  },
 }, {
   timestamps: true,
 });

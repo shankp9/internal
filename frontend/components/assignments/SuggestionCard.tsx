@@ -1,9 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { format } from 'date-fns';
-import { Check, X, User, Calendar, Tag } from 'lucide-react';
+import { Check, X, User, Calendar, Tag, FileText } from 'lucide-react';
 import TaskBreakdownView from './TaskBreakdownView';
+import TaskBreakdownViewer from './TaskBreakdownViewer';
+import { assignmentsAPI } from '@/lib/api';
 
 interface SuggestionCardProps {
   suggestion: any;
@@ -14,6 +16,37 @@ interface SuggestionCardProps {
 export default function SuggestionCard({ suggestion, onApprove, onReject }: SuggestionCardProps) {
   const [showTasks, setShowTasks] = useState(false);
   const [rejectionReason, setRejectionReason] = useState('');
+  const [taskBreakdownMarkdown, setTaskBreakdownMarkdown] = useState<string | null>(null);
+  const [loadingMarkdown, setLoadingMarkdown] = useState(false);
+  const [showMarkdown, setShowMarkdown] = useState(false);
+
+  // Load task breakdown markdown if suggestion has an associated assignment
+  useEffect(() => {
+    if (suggestion.assignmentId) {
+      loadTaskBreakdownMarkdown();
+    }
+  }, [suggestion.assignmentId]);
+
+  const loadTaskBreakdownMarkdown = async () => {
+    if (!suggestion.assignmentId) return;
+    
+    setLoadingMarkdown(true);
+    try {
+      const response = await assignmentsAPI.getTaskBreakdown(suggestion.assignmentId);
+      const breakdownData = response.data.data;
+      const markdown = breakdownData && breakdownData.markdown && breakdownData.markdown.trim() !== ''
+        ? breakdownData.markdown
+        : null;
+      setTaskBreakdownMarkdown(markdown);
+    } catch (error: any) {
+      if (error.response?.status !== 404) {
+        console.error('Failed to load task breakdown markdown:', error);
+      }
+      setTaskBreakdownMarkdown(null);
+    } finally {
+      setLoadingMarkdown(false);
+    }
+  };
 
   return (
     <div className="border border-border-default rounded-xl p-4 bg-background-secondary">
@@ -51,17 +84,57 @@ export default function SuggestionCard({ suggestion, onApprove, onReject }: Sugg
         </div>
       </div>
 
-      {suggestion.taskBreakdown && (
-        <div>
-          <button
-            onClick={() => setShowTasks(!showTasks)}
-            className="text-sm text-primary-main hover:text-primary-hover mb-3"
-          >
-            {showTasks ? 'Hide' : 'Show'} Task Breakdown
-          </button>
-          {showTasks && (
-            <div className="mt-3 pt-3 border-t border-border-light">
+      {(suggestion.taskBreakdown || taskBreakdownMarkdown || suggestion.assignmentId) && (
+        <div className="mt-3 pt-3 border-t border-border-light">
+          <div className="flex items-center gap-4 mb-3">
+            {suggestion.taskBreakdown && (
+              <button
+                onClick={() => setShowTasks(!showTasks)}
+                className="text-sm text-primary-main hover:text-primary-hover font-medium"
+              >
+                {showTasks ? 'Hide' : 'Show'} Structured Task Breakdown
+              </button>
+            )}
+            {(taskBreakdownMarkdown || suggestion.assignmentId) && (
+              <button
+                onClick={() => {
+                  if (!showMarkdown && suggestion.assignmentId && !taskBreakdownMarkdown) {
+                    loadTaskBreakdownMarkdown();
+                  }
+                  setShowMarkdown(!showMarkdown);
+                }}
+                className="text-sm text-primary-main hover:text-primary-hover font-medium flex items-center gap-1"
+                disabled={loadingMarkdown}
+              >
+                <FileText className="w-4 h-4" />
+                {loadingMarkdown ? 'Loading...' : showMarkdown ? 'Hide' : 'Show'} Detailed Task Breakdown
+              </button>
+            )}
+          </div>
+          {showTasks && suggestion.taskBreakdown && (
+            <div className="mt-3">
               <TaskBreakdownView taskBreakdown={suggestion.taskBreakdown} />
+            </div>
+          )}
+          {showMarkdown && (taskBreakdownMarkdown || loadingMarkdown) && (
+            <div className="mt-3">
+              {loadingMarkdown ? (
+                <div className="flex items-center justify-center py-8">
+                  <div className="flex flex-col items-center gap-2">
+                    <div className="animate-spin rounded-full h-6 w-6 border-2 border-primary-main border-t-transparent"></div>
+                    <p className="text-xs text-text-muted">Loading task breakdown...</p>
+                  </div>
+                </div>
+              ) : taskBreakdownMarkdown ? (
+                <div className="bg-background-primary rounded-lg border border-border-default p-4">
+                  <TaskBreakdownViewer markdown={taskBreakdownMarkdown} />
+                </div>
+              ) : (
+                <div className="text-center py-8 text-text-muted">
+                  <p className="text-sm">No detailed task breakdown available yet</p>
+                  <p className="text-xs mt-1 text-text-light">Task breakdown will be generated when assignment is created or approved</p>
+                </div>
+              )}
             </div>
           )}
         </div>
