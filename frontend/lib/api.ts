@@ -142,8 +142,89 @@ export const meetingsAPI = {
   },
   getById: (meetingId: string) => api.get(`/meetings/${meetingId}`),
   getByProject: (projectId: string) => api.get(`/meetings/project/${projectId}`),
+  getPipelineStatus: (meetingId: string) => api.get(`/meetings/pipeline-status/${meetingId}`),
   generatePRD: (meetingId: string) => api.post(`/meetings/${meetingId}/generate-prd`),
   generateAssignments: (meetingId: string) => api.post(`/meetings/${meetingId}/generate-assignments`),
+  extractTranscript: (
+    file: File,
+    onProgress: (data: {
+      type: 'start' | 'word' | 'field' | 'complete' | 'error';
+      field?: 'title' | 'summary' | 'agenda' | 'participants';
+      word?: string;
+      text?: string;
+      fullText?: string;
+      isComplete?: boolean;
+      data?: {
+        title: string;
+        summary: string;
+        agenda: string;
+        participants: Array<{ name: string; role: string; email: string }>;
+      };
+      message?: string;
+      rawResponse?: string;
+    }) => void
+  ): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      const formData = new FormData();
+      formData.append('transcript', file);
+
+      const token = localStorage.getItem('token');
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api';
+      const url = `${API_URL}/meetings/extract-transcript`;
+
+      const xhr = new XMLHttpRequest();
+
+      xhr.open('POST', url, true);
+      if (token) {
+        xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      }
+
+      xhr.onreadystatechange = () => {
+        if (xhr.readyState === XMLHttpRequest.DONE) {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve();
+          } else {
+            reject(new Error(`Request failed with status ${xhr.status}`));
+          }
+        }
+      };
+
+      xhr.onerror = () => {
+        reject(new Error('Network error'));
+      };
+
+      // Handle Server-Sent Events (SSE)
+      let buffer = '';
+      xhr.onprogress = () => {
+        const responseText = xhr.responseText;
+        const newData = responseText.slice(buffer.length);
+        buffer = responseText;
+
+        // Parse SSE format: "data: {...}\n\n"
+        const lines = newData.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              onProgress(data);
+
+              if (data.type === 'complete' || data.type === 'error') {
+                if (data.type === 'complete') {
+                  resolve();
+                } else {
+                  reject(new Error(data.message || 'Extraction failed'));
+                }
+              }
+            } catch (e) {
+              console.error('Failed to parse SSE data:', e);
+            }
+          }
+        }
+      };
+
+      xhr.send(formData);
+    });
+  },
 };
 
 // PRD API

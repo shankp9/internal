@@ -25,6 +25,8 @@ export default function ProjectDetailPage() {
   const [selectedMeeting, setSelectedMeeting] = useState<string | null>(null);
   const [clients, setClients] = useState<any[]>([]);
   const [activeTab, setActiveTab] = useState<'overview' | 'meetings' | 'prd' | 'suggestions'>('overview');
+  const [meetingListRefreshTrigger, setMeetingListRefreshTrigger] = useState(0);
+  const [highlightMeetingId, setHighlightMeetingId] = useState<string | undefined>(undefined);
   const projectId = params?.id as string;
   const user = getStoredUser();
 
@@ -539,6 +541,8 @@ export default function ProjectDetailPage() {
               <MeetingList
                 projectId={projectId}
                 onSelectMeeting={setSelectedMeeting}
+                refreshTrigger={meetingListRefreshTrigger}
+                highlightMeetingId={highlightMeetingId}
               />
             )}
           </div>
@@ -572,11 +576,22 @@ export default function ProjectDetailPage() {
         <MeetingModal
           projectId={projectId}
           onClose={() => setMeetingModalOpen(false)}
-          onSuccess={() => {
+          onSuccess={(meetingId) => {
             setMeetingModalOpen(false);
-            if (activeTab !== 'meetings') {
-              setActiveTab('meetings');
+            // Switch to meetings tab
+            setActiveTab('meetings');
+            // Set the meeting ID to highlight
+            if (meetingId) {
+              setHighlightMeetingId(meetingId);
+              // Clear highlight after 3 seconds
+              setTimeout(() => {
+                setHighlightMeetingId(undefined);
+              }, 3000);
             }
+            // Refresh meeting list to show the new meeting
+            setMeetingListRefreshTrigger((prev) => prev + 1);
+            // Also refresh project data
+            loadProject();
           }}
         />
       )}

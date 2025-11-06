@@ -1,27 +1,40 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { useDropzone } from 'react-dropzone';
 import { meetingsAPI } from '@/lib/api';
 import { toast } from 'react-hot-toast';
 import { X, Upload, File, Loader2, CheckCircle2, Sparkles } from 'lucide-react';
+import StreamingTextField from './StreamingTextField';
 
 interface MeetingModalProps {
   projectId: string;
   onClose: () => void;
-  onSuccess?: () => void;
+  onSuccess?: (meetingId?: string) => void;
 }
 
-type ProgressState = 'idle' | 'uploading' | 'processing' | 'generating-prd' | 'completed' | 'error';
+type Step = 'upload' | 'extract' | 'edit';
 
 export default function MeetingModal({ projectId, onClose, onSuccess }: MeetingModalProps) {
+  const [currentStep, setCurrentStep] = useState<Step>('upload');
   const [loading, setLoading] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [progressState, setProgressState] = useState<ProgressState>('idle');
-  const [progressMessage, setProgressMessage] = useState('');
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [extractedData, setExtractedData] = useState({
+    title: '',
+    summary: '',
+    agenda: '',
+    participants: [] as Array<{ name: string; role: string; email: string }>,
+  });
+  const [streamingFields, setStreamingFields] = useState({
+    title: false,
+    summary: false,
+    agenda: false,
+    participants: false,
+  });
 
-  const { register, handleSubmit, formState: { errors } } = useForm({
+  const { register, handleSubmit, formState: { errors }, setValue, watch } = useForm({
     defaultValues: {
       title: '',
       meetingDate: new Date().toISOString().split('T')[0],
@@ -61,13 +74,68 @@ export default function MeetingModal({ projectId, onClose, onSuccess }: MeetingM
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
     },
     maxFiles: 1,
-    disabled: loading || progressState !== 'idle',
+    disabled: loading || currentStep !== 'upload',
   });
+
+  const handleExtractDetails = async () => {
+    if (!selectedFile) {
+      toast.error('Please upload a transcript file first');
+      return;
+    }
+
+    setIsExtracting(true);
+    setCurrentStep('extract');
+    setStreamingFields({ title: true, summary: true, agenda: true, participants: true });
+
+    try {
+      await meetingsAPI.extractTranscript(selectedFile, (data) => {
+        if (data.type === 'start') {
+          // Reset extracted data
+          setExtractedData({ title: '', summary: '', agenda: '', participants: [] });
+        } else if (data.type === 'field' && data.field) {
+          // Update specific field
+          setStreamingFields((prev) => ({ ...prev, [data.field!]: false }));
+          
+          if (data.field === 'participants' && data.text) {
+            try {
+              const participants = JSON.parse(data.text);
+              setExtractedData((prev) => ({ ...prev, participants }));
+              setValue('participants', participants.map((p: any) => `${p.name}, ${p.role}, ${p.email || ''}`).join('\n'));
+            } catch (e) {
+              console.error('Failed to parse participants:', e);
+            }
+          } else if (data.field && data.text) {
+            setExtractedData((prev) => ({ ...prev, [data.field!]: data.text! }));
+            setValue(data.field, data.text);
+          }
+        } else if (data.type === 'complete' && data.data) {
+          // All fields complete
+          setExtractedData(data.data);
+          setValue('title', data.data.title);
+          setValue('summary', data.data.summary);
+          setValue('agenda', data.data.agenda);
+          setValue('participants', data.data.participants.map((p: any) => `${p.name}, ${p.role}, ${p.email || ''}`).join('\n'));
+          setStreamingFields({ title: false, summary: false, agenda: false, participants: false });
+          setCurrentStep('edit');
+          setIsExtracting(false);
+          toast.success('Meeting details extracted successfully!');
+        } else if (data.type === 'error') {
+          setStreamingFields({ title: false, summary: false, agenda: false, participants: false });
+          setIsExtracting(false);
+          toast.error(data.message || 'Failed to extract meeting details');
+          setCurrentStep('upload');
+        }
+      });
+    } catch (error: any) {
+      setStreamingFields({ title: false, summary: false, agenda: false, participants: false });
+      setIsExtracting(false);
+      toast.error(error.message || 'Failed to extract meeting details');
+      setCurrentStep('upload');
+    }
+  };
 
   const onSubmit = async (data: any) => {
     setLoading(true);
-    setProgressState('uploading');
-    setProgressMessage('Uploading transcript file...');
 
     try {
       const participants = data.participants
@@ -80,7 +148,7 @@ export default function MeetingModal({ projectId, onClose, onSuccess }: MeetingM
                 email: parts[2] || '',
               };
             })
-            .filter((p: any) => p.name.trim() !== '') // Only include participants with a name
+            .filter((p: any) => p.name.trim() !== '')
         : [];
 
       const formData = new FormData();
@@ -95,39 +163,24 @@ export default function MeetingModal({ projectId, onClose, onSuccess }: MeetingM
         formData.append('autoGeneratePRD', 'true');
       }
 
-      setProgressState('processing');
-      setProgressMessage('Processing transcript file...');
-
       const response = await meetingsAPI.create(projectId, formData);
+      const createdMeetingId = response.data.data.meeting._id;
 
-      if (selectedFile && response.data.data.transcript) {
-        setProgressState('generating-prd');
-        setProgressMessage('Analyzing transcript and generating PRD...');
-        
-        // Wait a bit to show the PRD generation state
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-
-      setProgressState('completed');
-      setProgressMessage(selectedFile ? 'Meeting created and PRD generated successfully!' : 'Meeting created successfully!');
+      toast.success('Meeting created successfully!');
       
-      toast.success(selectedFile ? 'Meeting created and PRD generated successfully!' : 'Meeting created successfully!');
-      
-      // Small delay to show success state
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      onSuccess?.();
+      // Pass the created meeting ID to onSuccess for scrolling
+      onSuccess?.(createdMeetingId);
       onClose();
     } catch (error: any) {
-      setProgressState('error');
-      setProgressMessage('Failed to create meeting');
       toast.error(error.response?.data?.message || 'Failed to create meeting');
     } finally {
       setLoading(false);
-      setProgressState('idle');
-      setProgressMessage('');
     }
   };
+
+  const titleValue = watch('title');
+  const summaryValue = watch('summary');
+  const agendaValue = watch('agenda');
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fadeIn">
@@ -144,168 +197,150 @@ export default function MeetingModal({ projectId, onClose, onSuccess }: MeetingM
         </div>
 
         <form onSubmit={handleSubmit(onSubmit)} className="p-6 space-y-5">
-          <div>
-            <label htmlFor="title" className="block text-sm font-semibold text-text-heading mb-2">
-              Meeting Title <span className="text-priority-critical-text">*</span>
-            </label>
-            <input
-              {...register('title', { required: 'Meeting title is required' })}
-              type="text"
-              id="title"
-              className="w-full px-4 py-3 border border-border-default rounded-xl focus:ring-2 focus:ring-primary-main focus:border-primary-main outline-none transition-all bg-background-secondary focus:bg-background-primary"
-              placeholder="Enter meeting title"
-            />
-            {errors.title && (
-              <p className="mt-2 text-sm text-priority-critical-text">{errors.title.message as string}</p>
-            )}
-          </div>
-
-          <div>
-            <label htmlFor="meetingDate" className="block text-sm font-semibold text-text-heading mb-2">
-              Meeting Date <span className="text-priority-critical-text">*</span>
-            </label>
-            <input
-              {...register('meetingDate', { required: 'Meeting date is required' })}
-              type="date"
-              id="meetingDate"
-              className="w-full px-4 py-3 border border-border-default rounded-xl focus:ring-2 focus:ring-primary-main focus:border-primary-main outline-none transition-all bg-background-secondary focus:bg-background-primary"
-            />
-            {errors.meetingDate && (
-              <p className="mt-2 text-sm text-priority-critical-text">{errors.meetingDate.message as string}</p>
-            )}
-          </div>
-
-          <div>
-            <label htmlFor="participants" className="block text-sm font-semibold text-text-heading mb-2">
-              Participants (one per line: Name, Role, Email)
-            </label>
-            <textarea
-              {...register('participants')}
-              id="participants"
-              rows={4}
-              className="w-full px-4 py-3 border border-border-default rounded-xl focus:ring-2 focus:ring-primary-main focus:border-primary-main outline-none transition-all bg-background-secondary focus:bg-background-primary"
-              placeholder="John Doe, Project Manager, john@example.com&#10;Jane Smith, Developer, jane@example.com"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="agenda" className="block text-sm font-semibold text-text-heading mb-2">
-              Agenda
-            </label>
-            <textarea
-              {...register('agenda')}
-              id="agenda"
-              rows={3}
-              className="w-full px-4 py-3 border border-border-default rounded-xl focus:ring-2 focus:ring-primary-main focus:border-primary-main outline-none transition-all bg-background-secondary focus:bg-background-primary"
-              placeholder="Meeting agenda items..."
-            />
-          </div>
-
-          <div>
-            <label htmlFor="summary" className="block text-sm font-semibold text-text-heading mb-2">
-              Summary
-            </label>
-            <textarea
-              {...register('summary')}
-              id="summary"
-              rows={3}
-              className="w-full px-4 py-3 border border-border-default rounded-xl focus:ring-2 focus:ring-primary-main focus:border-primary-main outline-none transition-all bg-background-secondary focus:bg-background-primary"
-              placeholder="Meeting summary..."
-            />
-          </div>
-
-          {/* Transcript Upload Section */}
-          <div>
-            <label className="block text-sm font-semibold text-text-heading mb-2">
-              Meeting Transcript (Optional)
-            </label>
-            <p className="text-xs text-text-light mb-3">
-              Upload a transcript file to automatically generate PRD and assignment suggestions
-            </p>
-            <div
-              {...getRootProps()}
-              className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all ${
-                isDragActive
-                  ? 'border-primary-main bg-primary-50/50'
-                  : 'border-border-default hover:border-primary-main hover:bg-background-secondary'
-              } ${loading || progressState !== 'idle' ? 'opacity-50 cursor-not-allowed' : ''}`}
-            >
-              <input {...getInputProps()} />
-              {selectedFile ? (
-                <div className="flex flex-col items-center gap-3">
-                  <File className="w-8 h-8 text-primary-main" />
-                  <div>
-                    <p className="text-text-heading font-medium">{selectedFile.name}</p>
-                    <p className="text-xs text-text-light mt-1">
-                      {(selectedFile.size / 1024).toFixed(2)} KB
-                    </p>
-                  </div>
-                  {!loading && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedFile(null);
-                      }}
-                      className="text-xs text-priority-critical-text hover:text-priority-critical-hover"
-                    >
-                      Remove file
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <div className="flex flex-col items-center gap-3">
-                  <Upload className="w-8 h-8 text-text-light" />
-                  <div>
-                    <p className="text-text-heading font-medium">
-                      {isDragActive ? 'Drop the file here' : 'Drag & drop transcript file'}
-                    </p>
-                    <p className="text-sm text-text-light mt-1">or click to select</p>
-                    <p className="text-xs text-text-light mt-2">Supported: .txt, .pdf, .docx (max 10MB)</p>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Progress Indicator */}
-          {(progressState !== 'idle' && progressState !== 'completed') && (
-            <div className="bg-primary-50 border border-primary-200 rounded-xl p-4">
-              <div className="flex items-center gap-3">
-                <Loader2 className={`w-5 h-5 text-primary-main ${progressState !== 'error' ? 'animate-spin' : ''}`} />
-                <div className="flex-1">
-                  <p className="text-sm font-medium text-text-heading">{progressMessage}</p>
-                  {progressState === 'uploading' && (
-                    <div className="mt-2 w-full bg-primary-200 rounded-full h-2">
-                      <div className="bg-primary-main h-2 rounded-full animate-pulse" style={{ width: '30%' }}></div>
+          {/* Step 1: Upload Transcript */}
+          {currentStep === 'upload' && (
+            <div className="space-y-5">
+              <div>
+                <label className="block text-sm font-semibold text-text-heading mb-2">
+                  Meeting Transcript <span className="text-priority-critical-text">*</span>
+                </label>
+                <p className="text-xs text-text-light mb-3">
+                  Upload a transcript file to extract meeting details automatically
+                </p>
+                <div
+                  {...getRootProps()}
+                  className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all ${
+                    isDragActive
+                      ? 'border-primary-main bg-primary-50/50'
+                      : 'border-border-default hover:border-primary-main hover:bg-background-secondary'
+                  } ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                >
+                  <input {...getInputProps()} />
+                  {selectedFile ? (
+                    <div className="flex flex-col items-center gap-3">
+                      <File className="w-8 h-8 text-primary-main" />
+                      <div>
+                        <p className="text-text-heading font-medium">{selectedFile.name}</p>
+                        <p className="text-xs text-text-light mt-1">
+                          {(selectedFile.size / 1024).toFixed(2)} KB
+                        </p>
+                      </div>
+                      {!loading && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedFile(null);
+                          }}
+                          className="text-xs text-priority-critical-text hover:text-priority-critical-hover"
+                        >
+                          Remove file
+                        </button>
+                      )}
                     </div>
-                  )}
-                  {progressState === 'processing' && (
-                    <div className="mt-2 w-full bg-primary-200 rounded-full h-2">
-                      <div className="bg-primary-main h-2 rounded-full animate-pulse" style={{ width: '60%' }}></div>
-                    </div>
-                  )}
-                  {progressState === 'generating-prd' && (
-                    <div className="mt-2 flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-primary-main animate-pulse" />
-                      <div className="flex-1 bg-primary-200 rounded-full h-2">
-                        <div className="bg-primary-main h-2 rounded-full animate-pulse" style={{ width: '90%' }}></div>
+                  ) : (
+                    <div className="flex flex-col items-center gap-3">
+                      <Upload className="w-8 h-8 text-text-light" />
+                      <div>
+                        <p className="text-text-heading font-medium">
+                          {isDragActive ? 'Drop the file here' : 'Drag & drop transcript file'}
+                        </p>
+                        <p className="text-sm text-text-light mt-1">or click to select</p>
+                        <p className="text-xs text-text-light mt-2">Supported: .txt, .pdf, .docx (max 10MB)</p>
                       </div>
                     </div>
                   )}
                 </div>
               </div>
+
+              {selectedFile && (
+                <button
+                  type="button"
+                  onClick={handleExtractDetails}
+                  disabled={isExtracting}
+                  className="w-full px-5 py-2.5 bg-gradient-to-r from-primary-main to-primary-hover text-white rounded-xl hover:from-primary-hover hover:to-primary-main/90 transition-all shadow-soft hover:shadow-medium font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                >
+                  {isExtracting ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      Extracting...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-5 h-5" />
+                      Extract Meeting Details
+                    </>
+                  )}
+                </button>
+              )}
             </div>
           )}
 
-          {progressState === 'completed' && (
-            <div className="bg-green-50 border border-green-200 rounded-xl p-4">
-              <div className="flex items-center gap-3">
-                <CheckCircle2 className="w-5 h-5 text-green-600" />
-                <p className="text-sm font-medium text-green-800">{progressMessage}</p>
+          {/* Step 2 & 3: Extract and Edit */}
+          {(currentStep === 'extract' || currentStep === 'edit') && (
+            <div className="space-y-5">
+              <div>
+                <label htmlFor="meetingDate" className="block text-sm font-semibold text-text-heading mb-2">
+                  Meeting Date <span className="text-priority-critical-text">*</span>
+                </label>
+                <input
+                  {...register('meetingDate', { required: 'Meeting date is required' })}
+                  type="date"
+                  id="meetingDate"
+                  className="w-full px-4 py-3 border border-border-default rounded-xl focus:ring-2 focus:ring-primary-main focus:border-primary-main outline-none transition-all bg-background-secondary focus:bg-background-primary"
+                />
+                {errors.meetingDate && (
+                  <p className="mt-2 text-sm text-priority-critical-text">{errors.meetingDate.message as string}</p>
+                )}
+              </div>
+
+              <StreamingTextField
+                label="Meeting Title"
+                value={titleValue}
+                onChange={(value) => setValue('title', value)}
+                placeholder="Enter meeting title"
+                isStreaming={streamingFields.title}
+                className=""
+              />
+              {errors.title && (
+                <p className="mt-2 text-sm text-priority-critical-text">{errors.title.message as string}</p>
+              )}
+
+              <StreamingTextField
+                label="Summary"
+                value={summaryValue}
+                onChange={(value) => setValue('summary', value)}
+                placeholder="Meeting summary..."
+                rows={4}
+                isStreaming={streamingFields.summary}
+                className=""
+              />
+
+              <StreamingTextField
+                label="Agenda"
+                value={agendaValue}
+                onChange={(value) => setValue('agenda', value)}
+                placeholder="Meeting agenda items..."
+                rows={3}
+                isStreaming={streamingFields.agenda}
+                className=""
+              />
+
+              <div>
+                <label htmlFor="participants" className="block text-sm font-semibold text-text-heading mb-2">
+                  Participants (one per line: Name, Role, Email)
+                </label>
+                <textarea
+                  {...register('participants')}
+                  id="participants"
+                  rows={4}
+                  className="w-full px-4 py-3 border border-border-default rounded-xl focus:ring-2 focus:ring-primary-main focus:border-primary-main outline-none transition-all bg-background-secondary focus:bg-background-primary"
+                  placeholder="John Doe, Project Manager, john@example.com&#10;Jane Smith, Developer, jane@example.com"
+                />
               </div>
             </div>
           )}
+
 
           <div className="flex items-center justify-end space-x-3 pt-6 border-t border-border-light">
             <button
@@ -315,17 +350,25 @@ export default function MeetingModal({ projectId, onClose, onSuccess }: MeetingM
             >
               Cancel
             </button>
-            <button
-              type="submit"
-              disabled={loading}
-              className="px-5 py-2.5 bg-gradient-to-r from-primary-main to-primary-hover text-white rounded-xl hover:from-primary-hover hover:to-primary-main/90 transition-all shadow-soft hover:shadow-medium font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-            >
-              {loading ? 'Creating...' : 'Create Meeting'}
-            </button>
+            {currentStep === 'edit' && (
+              <button
+                type="submit"
+                disabled={loading}
+                className="px-5 py-2.5 bg-gradient-to-r from-primary-main to-primary-hover text-white rounded-xl hover:from-primary-hover hover:to-primary-main/90 transition-all shadow-soft hover:shadow-medium font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {loading ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Creating...
+                  </>
+                ) : (
+                  'Create Meeting'
+                )}
+              </button>
+            )}
           </div>
         </form>
       </div>
     </div>
   );
 }
-

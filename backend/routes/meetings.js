@@ -10,8 +10,234 @@ const fs = require('fs');
 const { executeWorkflow } = require('../services/agentic/orchestrator');
 const User = require('../models/User');
 const Assignment = require('../models/Assignment');
+const { openai } = require('../services/aiService');
+const PipelineExecution = require('../models/PipelineExecution');
 
 const router = express.Router();
+
+// @route   POST /api/meetings/extract-transcript
+// @desc    Extract meeting details from transcript using AI with streaming
+// @access  Private
+router.post('/extract-transcript', protect, upload, async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No file uploaded',
+      });
+    }
+
+    // Parse the file
+    const fileType = path.extname(req.file.originalname).slice(1).toLowerCase();
+    let parsedContent;
+    
+    try {
+      parsedContent = await parseFile(req.file.path, fileType);
+    } catch (parseError) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({
+        success: false,
+        message: `Failed to parse file: ${parseError.message}`,
+      });
+    }
+
+    // Set up Server-Sent Events (SSE)
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+
+    // Helper function to send SSE message
+    const sendSSE = (data) => {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // Send initial message
+    sendSSE({ type: 'start', message: 'Starting transcript extraction...' });
+
+    if (!openai) {
+      fs.unlinkSync(req.file.path);
+      sendSSE({ type: 'error', message: 'OpenAI API key is not configured' });
+      res.end();
+      return;
+    }
+
+    try {
+      // Create prompt for extracting meeting details
+      const prompt = `Analyze the following meeting transcript and extract the following information:
+1. Meeting Title - A concise, descriptive title for the meeting
+2. Summary - A comprehensive summary of the meeting (2-3 paragraphs)
+3. Agenda - A list of agenda items discussed (bullet points)
+4. Participants - A list of participants with their names, roles, and emails if mentioned
+
+Transcript:
+${parsedContent}
+
+Return the response as JSON with the following structure:
+{
+  "title": "Meeting title here",
+  "summary": "Meeting summary here",
+  "agenda": "Agenda items here (bullet points)",
+  "participants": [
+    {
+      "name": "Participant name",
+      "role": "Participant role",
+      "email": "email@example.com" or ""
+    }
+  ]
+}
+
+Return only valid JSON, no markdown formatting.`;
+
+      // Use OpenAI streaming API
+      const stream = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a helpful assistant that extracts meeting information from transcripts. Always return valid JSON only.',
+          },
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        temperature: 0.3,
+        stream: true,
+      });
+
+      let fullResponse = '';
+      let currentField = null;
+      let currentText = '';
+      let extractedData = {
+        title: '',
+        summary: '',
+        agenda: '',
+        participants: [],
+      };
+
+      // Process streaming response
+      for await (const chunk of stream) {
+        const content = chunk.choices[0]?.delta?.content || '';
+        if (content) {
+          fullResponse += content;
+          
+          // Try to parse JSON incrementally
+          // For word-by-word streaming, we'll send updates as we receive them
+          // The client will handle the word-by-word display
+          
+          // Send word-by-word updates
+          const words = content.split(/(\s+)/);
+          for (const word of words) {
+            if (word.trim()) {
+              sendSSE({
+                type: 'word',
+                word: word,
+                fullText: fullResponse,
+              });
+            }
+          }
+        }
+      }
+
+      // Parse the final JSON response
+      try {
+        // Clean up the response - remove markdown code blocks if present
+        let jsonText = fullResponse.trim();
+        if (jsonText.startsWith('```json')) {
+          jsonText = jsonText.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+        } else if (jsonText.startsWith('```')) {
+          jsonText = jsonText.replace(/```\n?/g, '');
+        }
+
+        // Extract JSON object
+        const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          jsonText = jsonMatch[0];
+        }
+
+        const parsed = JSON.parse(jsonText);
+        
+        // Send field-by-field updates
+        if (parsed.title) {
+          sendSSE({
+            type: 'field',
+            field: 'title',
+            text: parsed.title,
+            isComplete: true,
+          });
+        }
+        
+        if (parsed.summary) {
+          sendSSE({
+            type: 'field',
+            field: 'summary',
+            text: parsed.summary,
+            isComplete: true,
+          });
+        }
+        
+        if (parsed.agenda) {
+          sendSSE({
+            type: 'field',
+            field: 'agenda',
+            text: parsed.agenda,
+            isComplete: true,
+          });
+        }
+        
+        if (parsed.participants && Array.isArray(parsed.participants)) {
+          sendSSE({
+            type: 'field',
+            field: 'participants',
+            text: JSON.stringify(parsed.participants),
+            isComplete: true,
+          });
+        }
+
+        // Send final complete data
+        sendSSE({
+          type: 'complete',
+          data: {
+            title: parsed.title || '',
+            summary: parsed.summary || '',
+            agenda: parsed.agenda || '',
+            participants: parsed.participants || [],
+          },
+        });
+      } catch (parseError) {
+        console.error('Failed to parse AI response:', parseError);
+        sendSSE({
+          type: 'error',
+          message: 'Failed to parse extracted data',
+          rawResponse: fullResponse,
+        });
+      }
+
+      // Clean up file
+      fs.unlinkSync(req.file.path);
+      
+      // End SSE stream
+      res.end();
+    } catch (error) {
+      console.error('OpenAI streaming error:', error);
+      fs.unlinkSync(req.file.path);
+      sendSSE({
+        type: 'error',
+        message: error.message || 'Failed to extract meeting details',
+      });
+      res.end();
+    }
+  } catch (error) {
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
 
 // @route   POST /api/meetings/:projectId
 // @desc    Create meeting record with optional transcript upload
@@ -115,309 +341,72 @@ router.post('/:projectId', protect, uploadMultiple, async (req, res) => {
         // Auto-generate PRD if requested
         if (autoGeneratePRD === 'true' || autoGeneratePRD === true) {
           try {
-            // Get existing PRD if any
-            const PRDModel = require('../models/PRD');
-            const existingPRD = await PRDModel.findOne({ projectId: meeting.projectId });
-
-            // Get available developers
-            const allDevelopers = await User.find({ role: 'employee', isActive: true })
-              .select('name email skills');
-
-            // Prepare workflow input
-            const workflowInput = {
-              transcript: parsedContent,
-              projectId: meeting.projectId.toString(),
-              meetingId: meeting._id.toString(),
-              userId: req.user._id.toString(),
-              existingPRD: existingPRD ? existingPRD.content : null,
-              projectContext: {
-                name: project.name,
-                client: project.clientId?.name,
-                manager: project.managerId?.name,
-                startDate: project.startDate,
-                endDate: project.endDate,
-                tags: project.tags,
-              },
-              availableDevelopers: allDevelopers.map(dev => ({
-                id: dev._id.toString(),
-                name: dev.name,
-                email: dev.email,
-                skills: dev.skills || [],
-              })),
-            };
-
-            // Execute workflow to generate PRD and assignments
-            const result = await executeWorkflow(workflowInput);
-
-            // Step 1: Save PRD first (if generated) - Always try to save even if there are errors
-            if (result.prdUpdate) {
-              try {
-                const PRDModel = require('../models/PRD');
-                const PRDVersion = require('../models/PRDVersion');
-                
-                let prd = await PRDModel.findOne({ projectId: meeting.projectId });
-                const oldContent = prd ? prd.content : '';
-                const oldVersion = prd ? prd.version : 0;
-
-                if (prd) {
-                  prd.content = result.prdUpdate.content;
-                  prd.version = oldVersion + 1;
-                  prd.lastUpdatedBy = req.user._id;
-                  prd.lastMeetingId = meeting._id;
-                  await prd.save();
-                } else {
-                  prd = await PRDModel.create({
-                    projectId: meeting.projectId,
-                    content: result.prdUpdate.content,
-                    version: 1,
-                    lastUpdatedBy: req.user._id,
-                    lastMeetingId: meeting._id,
-                  });
-                  
-                  project.prdId = prd._id;
-                  await project.save();
-                }
-
-                // Create version record
-                await PRDVersion.create({
-                  projectId: meeting.projectId,
-                  prdId: prd._id,
-                  version: oldVersion + 1,
-                  content: result.prdUpdate.content,
-                  changes: JSON.stringify({}),
-                  changeSummary: oldVersion === 0 
-                    ? 'Initial PRD generated from meeting transcript'
-                    : 'PRD updated from meeting transcript',
+            // Check if pipeline execution already exists for this meeting
+            let pipelineExecution = await PipelineExecution.findOne({ meetingId: meeting._id });
+            
+            if (pipelineExecution && pipelineExecution.status === 'completed') {
+              console.log('[Meeting] Pipeline already completed for this meeting, skipping execution');
+              prdGenerated = true;
+            } else {
+              // Create or update pipeline execution record
+              if (!pipelineExecution) {
+                pipelineExecution = await PipelineExecution.create({
                   meetingId: meeting._id,
-                  meetingDate: meeting.meetingDate,
+                  projectId: meeting.projectId,
+                  status: 'pending',
                   createdBy: req.user._id,
                 });
-
-                prdGenerated = true;
-                console.log('[Meeting] PRD saved successfully');
-              } catch (prdSaveError) {
-                console.error('[Meeting] Error saving PRD:', prdSaveError);
-                // Continue even if PRD save fails - log but don't throw
               }
-            } else {
-              console.log('[Meeting] No PRD update in workflow result');
-            }
 
-            // Step 2: Save assignment suggestions immediately (if any) - Always try even if there were workflow errors
-            if (result.suggestions && result.suggestions.length > 0) {
-              try {
-                console.log(`[Meeting] Saving ${result.suggestions.length} assignment suggestions...`);
-                const AssignmentSuggestion = require('../models/AssignmentSuggestion');
-                const DeveloperTask = require('../models/DeveloperTask');
-                
-                // Batch fetch all developers at once
-                const developerIds = result.suggestions.map(s => s.developerId).filter(Boolean);
-                const developerNames = result.suggestions.map(s => s.developerName).filter(Boolean);
-                
-                const developers = await User.find({
-                  $or: [
-                    { _id: { $in: developerIds } },
-                    { name: { $in: developerNames } },
-                  ],
-                });
-                
-                const developerMap = new Map();
-                developers.forEach(dev => {
-                  developerMap.set(dev._id.toString(), dev);
-                  if (dev.name) developerMap.set(dev.name, dev);
-                });
+              // Get existing PRD if any
+              const PRDModel = require('../models/PRD');
+              const existingPRD = await PRDModel.findOne({ projectId: meeting.projectId });
 
-                // Prepare suggestions for batch creation
-                const suggestionsToCreate = [];
-                
-                for (const suggestion of result.suggestions) {
-                  let developer = null;
-                  if (suggestion.developerId) {
-                    developer = developerMap.get(suggestion.developerId);
-                  } else if (suggestion.developerName) {
-                    developer = developerMap.get(suggestion.developerName);
-                  }
+              // Get available developers
+              const allDevelopers = await User.find({ role: 'employee', isActive: true })
+                .select('name email skills');
 
-                  // If matchScore is 0 or very low, mark for manual assignment
-                  const needsManual = !developer || !suggestion.developerId || 
-                                    (suggestion.matchScore !== undefined && suggestion.matchScore < 30);
+              // Prepare workflow input
+              const workflowInput = {
+                transcript: parsedContent,
+                projectId: meeting.projectId.toString(),
+                meetingId: meeting._id.toString(),
+                userId: req.user._id.toString(),
+                existingPRD: existingPRD ? existingPRD.content : null,
+                projectContext: {
+                  name: project.name,
+                  client: project.clientId?.name,
+                  manager: project.managerId?.name,
+                  startDate: project.startDate,
+                  endDate: project.endDate,
+                  tags: project.tags,
+                },
+                availableDevelopers: allDevelopers.map(dev => ({
+                  id: dev._id.toString(),
+                  name: dev.name,
+                  email: dev.email,
+                  skills: dev.skills || [],
+                })),
+              };
 
-                  suggestionsToCreate.push({
-                    projectId: meeting.projectId,
-                    meetingId: meeting._id,
-                    developerId: developer ? developer._id : null,
-                    suggestedUtilization: suggestion.utilization || 50,
-                    suggestedStartDate: new Date(suggestion.startDate),
-                    suggestedEndDate: new Date(suggestion.endDate),
-                    tags: suggestion.tags || [],
-                    title: suggestion.title,
-                    description: suggestion.description || '',
-                    reasoning: suggestion.reasoning || 
-                      (needsManual ? 'No suitable developer matched - manager needs to assign' : ''),
-                    priority: suggestion.priority || 'medium',
-                    status: 'pending',
-                    createdBy: req.user._id,
-                    needsManualAssignment: needsManual,
-                    _tempTaskBreakdown: suggestion.taskBreakdown,
-                    _tempMatchScore: suggestion.matchScore || 0,
-                  });
-                }
-
-                // Batch create all suggestions
-                const createdSuggestions = await AssignmentSuggestion.insertMany(suggestionsToCreate);
-                console.log(`[Meeting] Created ${createdSuggestions.length} assignment suggestions`);
-
-                // Create tasks for suggestions that have breakdowns (batch)
-                const tasksToCreate = [];
-                const taskDependencyMap = new Map(); // Map task index to dependency info for later resolution
-
-                createdSuggestions.forEach((suggestion, index) => {
-                  const originalSuggestion = suggestionsToCreate[index];
-                  if (originalSuggestion._tempTaskBreakdown) {
-                    const breakdown = originalSuggestion._tempTaskBreakdown;
-                    
-                    // Store dependency info for later resolution (since taskIds are titles, not ObjectIds yet)
-                    const rawDependencies = breakdown.dependencies || [];
-                    taskDependencyMap.set(index, {
-                      rawDependencies,
-                      taskTitle: breakdown.taskTitle || suggestion.title,
-                    });
-                    
-                    // Create task without dependencies first (will be resolved after all tasks are created)
-                    tasksToCreate.push({
-                      assignmentSuggestionId: suggestion._id,
-                      projectId: meeting.projectId,
-                      developerId: suggestion.developerId || null, // Allow null if no developer assigned
-                      title: breakdown.taskTitle || suggestion.title,
-                      description: breakdown.taskDescription || suggestion.description || '',
-                      subtasks: breakdown.subtasks || [],
-                      acceptanceCriteria: breakdown.acceptanceCriteria || [],
-                      dependencies: [], // Will be populated after task creation
-                      technicalRequirements: breakdown.technicalRequirements || [],
-                      estimatedEffort: breakdown.estimatedEffortHours || 0,
-                      estimatedUtilization: suggestion.suggestedUtilization,
-                      priority: suggestion.priority,
-                      status: 'pending',
-                    });
-                  }
-                });
-
-                // Batch create all tasks (without dependencies first)
-                if (tasksToCreate.length > 0) {
-                  const createdTasks = await DeveloperTask.insertMany(tasksToCreate);
-                  console.log(`[Meeting] Created ${createdTasks.length} developer tasks`);
-                  
-                  // Now resolve dependencies by matching task titles to created task ObjectIds
-                  const titleToTaskIdMap = new Map();
-                  createdTasks.forEach((task, idx) => {
-                    const depInfo = taskDependencyMap.get(idx);
-                    if (depInfo) {
-                      titleToTaskIdMap.set(depInfo.taskTitle, task._id);
-                    }
-                  });
-
-                  // Update tasks with resolved dependencies
-                  const dependencyUpdateOps = [];
-                  createdTasks.forEach((task, idx) => {
-                    const depInfo = taskDependencyMap.get(idx);
-                    if (depInfo && depInfo.rawDependencies.length > 0) {
-                      const resolvedDependencies = depInfo.rawDependencies
-                        .map(dep => {
-                          // Try to find matching task by title
-                          const dependentTaskId = titleToTaskIdMap.get(dep.taskId);
-                          if (dependentTaskId) {
-                            return {
-                              taskId: dependentTaskId,
-                              description: dep.description || `Depends on: ${dep.taskId}`,
-                              taskTitle: dep.taskId, // Store title for reference
-                            };
-                          }
-                          // If no match found, store with just description and title (taskId will be null)
-                          return {
-                            taskId: null,
-                            description: dep.description || `Depends on: ${dep.taskId}`,
-                            taskTitle: dep.taskId,
-                          };
-                        });
-
-                      if (resolvedDependencies.length > 0) {
-                        dependencyUpdateOps.push({
-                          updateOne: {
-                            filter: { _id: task._id },
-                            update: { $set: { dependencies: resolvedDependencies } },
-                          },
-                        });
-                      }
-                    }
-                  });
-
-                  // Batch update tasks with resolved dependencies
-                  if (dependencyUpdateOps.length > 0) {
-                    await DeveloperTask.bulkWrite(dependencyUpdateOps);
-                    console.log(`[Meeting] Resolved dependencies for ${dependencyUpdateOps.length} tasks`);
-                  }
-                  
-                  // Batch update suggestions with task references
-                  const updateOps = createdTasks.map(task => ({
-                    updateOne: {
-                      filter: { _id: task.assignmentSuggestionId },
-                      update: { $set: { taskBreakdown: task._id } },
-                    },
-                  }));
-                  
-                  if (updateOps.length > 0) {
-                    await AssignmentSuggestion.bulkWrite(updateOps);
-                  }
-                }
-
-                console.log('[Meeting] Assignment suggestions saved successfully');
-              } catch (suggestionSaveError) {
-                console.error('[Meeting] Error saving assignment suggestions:', suggestionSaveError);
-                console.error('[Meeting] Error details:', suggestionSaveError.message);
-                // Try to save suggestions individually if batch fails
-                if (result.suggestions && result.suggestions.length > 0) {
-                  try {
-                    console.log('[Meeting] Attempting to save suggestions individually...');
-                    const AssignmentSuggestion = require('../models/AssignmentSuggestion');
-                    let savedCount = 0;
-                    for (const suggestion of result.suggestions) {
-                      try {
-                        // Try to save each suggestion individually (without tasks)
-                        await AssignmentSuggestion.create({
-                          projectId: meeting.projectId,
-                          meetingId: meeting._id,
-                          developerId: suggestion.developerId || null,
-                          suggestedUtilization: suggestion.utilization || 50,
-                          suggestedStartDate: new Date(suggestion.startDate),
-                          suggestedEndDate: new Date(suggestion.endDate),
-                          tags: suggestion.tags || [],
-                          title: suggestion.title,
-                          description: suggestion.description || '',
-                          reasoning: suggestion.reasoning || '',
-                          priority: suggestion.priority || 'medium',
-                          status: 'pending',
-                          createdBy: req.user._id,
-                          needsManualAssignment: suggestion.needsManualAssignment || false,
-                        });
-                        savedCount++;
-                      } catch (individualError) {
-                        console.error(`[Meeting] Failed to save suggestion "${suggestion.title}":`, individualError.message);
-                      }
-                    }
-                    console.log(`[Meeting] Saved ${savedCount} suggestions individually (tasks will need to be added manually)`);
-                  } catch (individualSaveError) {
-                    console.error('[Meeting] Failed to save suggestions individually:', individualSaveError.message);
-                  }
-                }
-              }
-            } else {
-              console.log('[Meeting] No assignment suggestions generated');
+              // Get pipeline namespace for Socket.IO events
+              const pipelineNamespace = req.app.get('pipelineNamespace');
+              
+              // Execute workflow to generate PRD and assignments (async - don't wait)
+              executeWorkflow(workflowInput, { 
+                pipelineNamespace,
+                pipelineExecutionId: pipelineExecution._id.toString(),
+              }).catch((error) => {
+                console.error('[Meeting] Pipeline execution error:', error);
+              });
+              
+              // Don't wait for pipeline to complete - return immediately
+              prdGenerated = true;
             }
           } catch (prdError) {
-            console.error('[Meeting] Workflow execution error:', prdError);
-            console.error('[Meeting] Error stack:', prdError.stack);
-            // Don't fail the meeting creation if PRD generation fails
-            // But log the error for debugging
+            console.error('[Meeting] Pipeline execution error:', prdError);
+            // Don't fail the meeting creation if pipeline fails
+            // Pipeline will handle its own errors and save state
           }
         }
       } catch (parseError) {
@@ -434,12 +423,21 @@ router.post('/:projectId', protect, uploadMultiple, async (req, res) => {
       await meeting.populate('transcriptId');
     }
 
+    // Get pipeline execution status if it exists
+    let pipelineExecution = null;
+    if (meeting.transcriptId) {
+      pipelineExecution = await PipelineExecution.findOne({ meetingId: meeting._id })
+        .select('status currentAgent progress agentResults startedAt completedAt error')
+        .lean();
+    }
+
     res.status(201).json({
       success: true,
       data: {
         meeting,
         transcript,
         prdGenerated,
+        pipelineExecution,
       },
     });
   } catch (error) {
@@ -556,7 +554,10 @@ router.post('/:meetingId/transcript', protect, upload, async (req, res) => {
         })),
       };
 
-      const result = await executeWorkflow(workflowInput);
+      // Get pipeline namespace for Socket.IO events
+      const pipelineNamespace = req.app.get('pipelineNamespace');
+      
+      const result = await executeWorkflow(workflowInput, { pipelineNamespace });
       if (result.prdUpdate && !result.errors?.length) {
         // Auto-save PRD
         const PRDModel = require('../models/PRD');
@@ -621,6 +622,34 @@ router.post('/:meetingId/transcript', protect, upload, async (req, res) => {
   }
 });
 
+// @route   GET /api/meetings/pipeline-status/:meetingId
+// @desc    Get pipeline execution status for a meeting
+// @access  Private
+router.get('/pipeline-status/:meetingId', protect, async (req, res) => {
+  try {
+    const pipelineExecution = await PipelineExecution.findOne({ meetingId: req.params.meetingId })
+      .select('status currentAgent progress agentResults startedAt completedAt error')
+      .lean();
+
+    if (!pipelineExecution) {
+      return res.status(404).json({
+        success: false,
+        message: 'Pipeline execution not found',
+      });
+    }
+
+    res.json({
+      success: true,
+      data: pipelineExecution,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
 // @route   GET /api/meetings/:meetingId
 // @desc    Get meeting details
 // @access  Private
@@ -649,9 +678,20 @@ router.get('/:meetingId', protect, async (req, res) => {
       });
     }
 
+    // Get pipeline execution status if it exists
+    let pipelineExecution = null;
+    if (meeting.transcriptId) {
+      pipelineExecution = await PipelineExecution.findOne({ meetingId: meeting._id })
+        .select('status currentAgent progress agentResults startedAt completedAt error')
+        .lean();
+    }
+
     res.json({
       success: true,
-      data: meeting,
+      data: {
+        meeting,
+        pipelineExecution,
+      },
     });
   } catch (error) {
     res.status(500).json({

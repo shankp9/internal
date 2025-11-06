@@ -1,12 +1,17 @@
 const express = require('express');
+const http = require('http');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const path = require('path');
+const { Server } = require('socket.io');
+const jwt = require('jsonwebtoken');
+const User = require('./models/User');
 
 dotenv.config();
 
 const app = express();
+const server = http.createServer(app);
 
 // Middleware
 app.use(cors());
@@ -65,9 +70,94 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/resource_
   process.exit(1);
 });
 
+// Initialize Socket.IO
+const io = new Server(server, {
+  cors: {
+    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
+});
+
+// Socket.IO authentication middleware
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth.token || socket.handshake.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return next(new Error('Authentication error: No token provided'));
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id).select('-password');
+    
+    if (!user || !user.isActive) {
+      return next(new Error('Authentication error: User not found or inactive'));
+    }
+    
+    socket.user = user;
+    next();
+  } catch (error) {
+    next(new Error('Authentication error: Invalid token'));
+  }
+});
+
+// Meeting pipeline namespace
+const pipelineNamespace = io.of('/pipeline');
+
+// Apply authentication to pipeline namespace
+pipelineNamespace.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth.token || socket.handshake.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return next(new Error('Authentication error: No token provided'));
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id).select('-password');
+    
+    if (!user || !user.isActive) {
+      return next(new Error('Authentication error: User not found or inactive'));
+    }
+    
+    socket.user = user;
+    next();
+  } catch (error) {
+    next(new Error('Authentication error: Invalid token'));
+  }
+});
+
+pipelineNamespace.on('connection', (socket) => {
+  console.log(`[Socket.IO] Client connected: ${socket.user.name} (${socket.user._id})`);
+  
+  // Join meeting pipeline room
+  socket.on('join-meeting-pipeline', (meetingId) => {
+    const room = `meeting-${meetingId}`;
+    socket.join(room);
+    console.log(`[Socket.IO] Client joined room: ${room}`);
+  });
+  
+  // Leave meeting pipeline room
+  socket.on('leave-meeting-pipeline', (meetingId) => {
+    const room = `meeting-${meetingId}`;
+    socket.leave(room);
+    console.log(`[Socket.IO] Client left room: ${room}`);
+  });
+  
+  socket.on('disconnect', () => {
+    console.log(`[Socket.IO] Client disconnected: ${socket.user.name}`);
+  });
+});
+
+// Export io instance for use in routes
+app.set('io', io);
+app.set('pipelineNamespace', pipelineNamespace);
+
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📡 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🔌 Socket.IO server initialized`);
 });
